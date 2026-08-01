@@ -1,9 +1,8 @@
-gradio>=5.0,<7
+streamlit>=1.40
 huggingface_hub>=0.23
 nibabel
 numpy
 pandas
 scipy
 plotly
-matplotlib
 pillow
