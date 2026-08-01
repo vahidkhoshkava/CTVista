@@ -63,7 +63,7 @@ TEXT = {
         "three_d": "Optional 3D Anatomical Overview",
         "generate_3d": "Generate lightweight 3D overview",
         "three_note": (
-            "CT-derived lung surface for visualization only—not clinical segmentation."
+            "Approximate air-space visualization for demonstration—not clinical segmentation."
         ),
         "value": "Why CTVista matters",
         "values": [
@@ -113,7 +113,7 @@ TEXT = {
         "three_d": "نمای کلی سه‌بعدی اختیاری",
         "generate_3d": "ایجاد نمای سه‌بعدی سبک",
         "three_note": (
-            "سطح سه‌بعدی استخراج‌شده از سی‌تی صرفاً برای نمایش است، نه تقسیم‌بندی بالینی."
+            "نمایش تقریبی فضای هوادار ریه برای نسخه نمایشی است، نه تقسیم‌بندی بالینی."
         ),
         "value": "چرا CTVista اهمیت دارد؟",
         "values": [
@@ -530,146 +530,62 @@ def get_slice(nii, z, vmin, vmax):
     return np.flipud(image.T)
 
 
-
-@st.cache_data(show_spinner="Creating a smooth 3D lung overview…")
+@st.cache_data(show_spinner="Creating a lightweight 3D lung surface…")
 def create_3d(path):
-    """
-    Create a lightweight CT-derived lung surface.
-
-    Slice-by-slice outside-air removal is more stable than 3D border
-    propagation because the trachea can connect the lungs to outside air.
-    """
+    """Build a lightweight, recognizable two-lung surface without exhausting memory."""
     nii = nib.as_closest_canonical(nib.load(path))
 
-    step_xy = 4
-    step_z = 3
+    # Aggressive downsampling keeps Streamlit Cloud stable.
+    step = 6
+    raw = np.asarray(nii.dataobj[::step, ::step, ::step], dtype=np.float32)
 
-    raw = np.asarray(
-        nii.dataobj[::step_xy, ::step_xy, ::step_z],
-        dtype=np.float32,
-    )
-
+    # CT-RATE stores values as 0..4095; convert approximately to Hounsfield units.
     if float(np.nanmin(raw)) >= 0 and float(np.nanmax(raw)) > 3000:
         raw -= 1024.0
 
     raw = np.nan_to_num(raw, nan=-1000.0)
-    air = raw < -400
 
-    lung_mask = np.zeros_like(air, dtype=bool)
+    # Air-like voxels include lungs and air outside the patient.
+    air = (raw > -1000) & (raw < -350)
 
-    for z in range(air.shape[2]):
-        slice_air = air[:, :, z]
-        labels, count = ndimage.label(slice_air)
+    # Remove all air connected to the volume border.
+    boundary = np.zeros_like(air, dtype=bool)
+    boundary[0, :, :] = boundary[-1, :, :] = True
+    boundary[:, 0, :] = boundary[:, -1, :] = True
+    boundary[:, :, 0] = boundary[:, :, -1] = True
+    outside = ndimage.binary_propagation(boundary, mask=air)
+    internal_air = air & (~outside)
 
-        if count == 0:
-            continue
+    # Clean small holes/noise while retaining lung contours.
+    internal_air = ndimage.binary_closing(internal_air, iterations=1)
+    labels, count = ndimage.label(internal_air)
+    if count == 0:
+        raise RuntimeError("No internal lung-like air regions were detected.")
 
-        border_labels = np.unique(
-            np.concatenate(
-                [
-                    labels[0, :],
-                    labels[-1, :],
-                    labels[:, 0],
-                    labels[:, -1],
-                ]
-            )
-        )
+    sizes = ndimage.sum(internal_air, labels, index=np.arange(1, count + 1))
+    keep = np.argsort(sizes)[-min(6, len(sizes)):] + 1
+    lung_mask = np.isin(labels, keep)
 
-        candidate = slice_air & (~np.isin(labels, border_labels))
-        candidate_labels, candidate_count = ndimage.label(candidate)
-
-        if candidate_count == 0:
-            continue
-
-        sizes = ndimage.sum(
-            candidate,
-            candidate_labels,
-            index=np.arange(1, candidate_count + 1),
-        )
-
-        kept = []
-
-        for index in np.argsort(sizes)[::-1]:
-            component_label = index + 1
-            component_size = sizes[index]
-
-            if component_size < 80:
-                continue
-
-            coords = np.argwhere(candidate_labels == component_label)
-            centroid = coords.mean(axis=0)
-
-            if not (
-                0.08 * candidate.shape[0] < centroid[0] < 0.92 * candidate.shape[0]
-                and 0.08 * candidate.shape[1] < centroid[1] < 0.92 * candidate.shape[1]
-            ):
-                continue
-
-            kept.append(component_label)
-
-            if len(kept) == 2:
-                break
-
-        if kept:
-            selected = np.isin(candidate_labels, kept)
-            selected = ndimage.binary_fill_holes(selected)
-            lung_mask[:, :, z] = selected
-
-    lung_mask = ndimage.binary_closing(
-        lung_mask,
-        structure=np.ones((3, 3, 3), dtype=bool),
-        iterations=2,
-    )
-    lung_mask = ndimage.binary_opening(
-        lung_mask,
-        structure=np.ones((2, 2, 2), dtype=bool),
-        iterations=1,
-    )
-
-    labels_3d, count_3d = ndimage.label(lung_mask)
-
-    if count_3d == 0:
-        raise RuntimeError("No stable lung regions were detected.")
-
-    sizes_3d = ndimage.sum(
-        lung_mask,
-        labels_3d,
-        index=np.arange(1, count_3d + 1),
-    )
-
-    keep_3d = np.argsort(sizes_3d)[-min(2, len(sizes_3d)):] + 1
-    lung_mask = np.isin(labels_3d, keep_3d)
-
-    smooth_field = ndimage.gaussian_filter(
-        lung_mask.astype(np.float32),
-        sigma=1.1,
-    )
-
-    spacing = np.asarray(
-        nii.header.get_zooms()[:3],
-        dtype=np.float32,
-    ) * np.array([step_xy, step_xy, step_z], dtype=np.float32)
-
+    # Split at the body midline so the two lungs can have distinct surfaces/colors.
     mid_x = lung_mask.shape[0] // 2
+    left_mask = lung_mask.copy()
+    left_mask[mid_x:, :, :] = False
+    right_mask = lung_mask.copy()
+    right_mask[:mid_x, :, :] = False
 
-    left_field = smooth_field.copy()
-    left_field[mid_x:, :, :] = 0.0
-
-    right_field = smooth_field.copy()
-    right_field[:mid_x, :, :] = 0.0
-
+    spacing = np.asarray(nii.header.get_zooms()[:3], dtype=np.float32) * step
     meshes = []
 
-    for field, color, name in [
-        (left_field, "#22B8CF", "Left lung"),
-        (right_field, "#5C7CFA", "Right lung"),
+    for mask, color, name in [
+        (left_mask, "#43B9E8", "Left lung"),
+        (right_mask, "#6E7DE8", "Right lung"),
     ]:
-        if float(field.max()) < 0.45:
+        if int(mask.sum()) < 100:
             continue
 
         verts, faces, _, _ = measure.marching_cubes(
-            field,
-            level=0.45,
+            mask.astype(np.float32),
+            level=0.5,
             spacing=tuple(spacing),
             step_size=1,
             allow_degenerate=False,
@@ -685,31 +601,28 @@ def create_3d(path):
                 k=faces[:, 2],
                 name=name,
                 color=color,
-                opacity=0.82,
+                opacity=0.72,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.28,
-                    diffuse=0.82,
-                    specular=0.52,
-                    roughness=0.28,
-                    fresnel=0.16,
+                    ambient=0.34,
+                    diffuse=0.78,
+                    specular=0.42,
+                    roughness=0.38,
+                    fresnel=0.12,
                 ),
-                lightposition=dict(x=150, y=200, z=260),
+                lightposition=dict(x=140, y=180, z=260),
                 hovertemplate=f"{name}<extra></extra>",
                 showscale=False,
             )
         )
 
-    if len(meshes) < 2:
-        raise RuntimeError(
-            "A recognizable two-lung surface could not be created from this scan."
-        )
+    if not meshes:
+        raise RuntimeError("A stable lung surface could not be created from this scan.")
 
     figure = go.Figure(meshes)
-
     figure.update_layout(
-        height=620,
-        margin=dict(l=0, r=0, t=42, b=0),
+        height=610,
+        margin=dict(l=0, r=0, t=45, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=True,
@@ -723,13 +636,10 @@ def create_3d(path):
         scene=dict(
             aspectmode="data",
             bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(visible=False),
-            yaxis=dict(visible=False),
-            zaxis=dict(visible=False),
-            camera=dict(
-                eye=dict(x=1.35, y=1.70, z=0.95),
-                up=dict(x=0, y=0, z=1),
-            ),
+            xaxis=dict(title="Left–right", showgrid=False, zeroline=False, showbackground=False),
+            yaxis=dict(title="Front–back", showgrid=False, zeroline=False, showbackground=False),
+            zaxis=dict(title="Head–feet", showgrid=False, zeroline=False, showbackground=False),
+            camera=dict(eye=dict(x=1.45, y=1.55, z=1.05)),
         ),
     )
 
