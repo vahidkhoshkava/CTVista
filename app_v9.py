@@ -63,7 +63,7 @@ TEXT = {
         "three_d": "Optional 3D Anatomical Overview",
         "generate_3d": "Generate lightweight 3D overview",
         "three_note": (
-            "AI-assisted CT-derived anatomical overview for visualization only—not clinical segmentation."
+            "CT-derived lung surface for visualization only—not clinical segmentation."
         ),
         "value": "Why CTVista matters",
         "values": [
@@ -113,7 +113,7 @@ TEXT = {
         "three_d": "نمای کلی سه‌بعدی اختیاری",
         "generate_3d": "ایجاد نمای سه‌بعدی سبک",
         "three_note": (
-            "نمای آناتومیک استخراج‌شده از سی‌تی با کمک هوش مصنوعی صرفاً برای نمایش است، نه تقسیم‌بندی بالینی."
+            "سطح سه‌بعدی استخراج‌شده از سی‌تی صرفاً برای نمایش است، نه تقسیم‌بندی بالینی."
         ),
         "value": "چرا CTVista اهمیت دارد؟",
         "values": [
@@ -531,47 +531,37 @@ def get_slice(nii, z, vmin, vmax):
 
 
 
-
-@st.cache_data(show_spinner="Creating a polished 3D lung overview…")
+@st.cache_data(show_spinner="Creating a smooth 3D lung overview…")
 def create_3d(path):
     """
-    Build a lightweight, CT-derived two-lung surface.
+    Create a lightweight CT-derived lung surface.
 
-    Design goals:
-    - preserve the two lungs as separate connected components;
-    - avoid the artificial midline cut used in earlier versions;
-    - use a frontal clinical-style camera instead of a top-down view;
-    - smooth enough for an investor demo without making the lungs spherical;
-    - remain light enough for Streamlit Cloud.
+    Slice-by-slice outside-air removal is more stable than 3D border
+    propagation because the trachea can connect the lungs to outside air.
     """
     nii = nib.as_closest_canonical(nib.load(path))
 
-    # Balanced resolution for visual quality and cloud stability.
-    step_xy = 3
-    step_z = 2
+    step_xy = 4
+    step_z = 3
 
-    volume = np.asarray(
+    raw = np.asarray(
         nii.dataobj[::step_xy, ::step_xy, ::step_z],
         dtype=np.float32,
     )
 
-    # CT-RATE commonly stores HU with a +1024 offset.
-    if float(np.nanmin(volume)) >= 0 and float(np.nanmax(volume)) > 3000:
-        volume -= 1024.0
+    if float(np.nanmin(raw)) >= 0 and float(np.nanmax(raw)) > 3000:
+        raw -= 1024.0
 
-    volume = np.nan_to_num(volume, nan=-1000.0)
+    raw = np.nan_to_num(raw, nan=-1000.0)
+    air = raw < -400
 
-    # Air-like voxels include lungs and external air.
-    air_mask = volume < -400
-    lung_mask = np.zeros_like(air_mask, dtype=bool)
+    lung_mask = np.zeros_like(air, dtype=bool)
 
-    # Remove external air independently on every axial slice.
-    # This avoids losing the lungs through their connection to the trachea.
-    for z_index in range(air_mask.shape[2]):
-        slice_air = air_mask[:, :, z_index]
-        labels, component_count = ndimage.label(slice_air)
+    for z in range(air.shape[2]):
+        slice_air = air[:, :, z]
+        labels, count = ndimage.label(slice_air)
 
-        if component_count == 0:
+        if count == 0:
             continue
 
         border_labels = np.unique(
@@ -585,66 +575,51 @@ def create_3d(path):
             )
         )
 
-        internal = slice_air & (~np.isin(labels, border_labels))
-        internal_labels, internal_count = ndimage.label(internal)
+        candidate = slice_air & (~np.isin(labels, border_labels))
+        candidate_labels, candidate_count = ndimage.label(candidate)
 
-        if internal_count == 0:
+        if candidate_count == 0:
             continue
 
-        component_sizes = ndimage.sum(
-            internal,
-            internal_labels,
-            index=np.arange(1, internal_count + 1),
+        sizes = ndimage.sum(
+            candidate,
+            candidate_labels,
+            index=np.arange(1, candidate_count + 1),
         )
 
-        selected_labels = []
+        kept = []
 
-        # Keep the two largest plausible internal air regions.
-        for size_index in np.argsort(component_sizes)[::-1]:
-            label_id = int(size_index + 1)
-            size = float(component_sizes[size_index])
+        for index in np.argsort(sizes)[::-1]:
+            component_label = index + 1
+            component_size = sizes[index]
 
-            if size < 120:
+            if component_size < 80:
                 continue
 
-            coordinates = np.argwhere(internal_labels == label_id)
-            centroid = coordinates.mean(axis=0)
+            coords = np.argwhere(candidate_labels == component_label)
+            centroid = coords.mean(axis=0)
 
-            # Exclude eccentric bowel gas or small peripheral pockets.
             if not (
-                0.10 * internal.shape[0] < centroid[0] < 0.90 * internal.shape[0]
-                and 0.08 * internal.shape[1] < centroid[1] < 0.92 * internal.shape[1]
+                0.08 * candidate.shape[0] < centroid[0] < 0.92 * candidate.shape[0]
+                and 0.08 * candidate.shape[1] < centroid[1] < 0.92 * candidate.shape[1]
             ):
                 continue
 
-            selected_labels.append(label_id)
+            kept.append(component_label)
 
-            if len(selected_labels) == 2:
+            if len(kept) == 2:
                 break
 
-        if selected_labels:
-            selected_slice = np.isin(internal_labels, selected_labels)
+        if kept:
+            selected = np.isin(candidate_labels, kept)
+            selected = ndimage.binary_fill_holes(selected)
+            lung_mask[:, :, z] = selected
 
-            # Fill vessels and bronchi to obtain the external lung envelope.
-            selected_slice = ndimage.binary_fill_holes(selected_slice)
-
-            # Smooth only within the slice to preserve apex-to-base variation.
-            selected_slice = ndimage.binary_closing(
-                selected_slice,
-                structure=np.ones((3, 3), dtype=bool),
-                iterations=1,
-            )
-
-            lung_mask[:, :, z_index] = selected_slice
-
-    # Bridge small gaps between neighboring slices.
     lung_mask = ndimage.binary_closing(
         lung_mask,
         structure=np.ones((3, 3, 3), dtype=bool),
-        iterations=1,
+        iterations=2,
     )
-
-    # Remove isolated specks without aggressively rounding the anatomy.
     lung_mask = ndimage.binary_opening(
         lung_mask,
         structure=np.ones((2, 2, 2), dtype=bool),
@@ -653,136 +628,88 @@ def create_3d(path):
 
     labels_3d, count_3d = ndimage.label(lung_mask)
 
-    if count_3d < 2:
-        raise RuntimeError(
-            "Two stable lung regions could not be separated from this scan."
-        )
+    if count_3d == 0:
+        raise RuntimeError("No stable lung regions were detected.")
 
-    component_sizes_3d = ndimage.sum(
+    sizes_3d = ndimage.sum(
         lung_mask,
         labels_3d,
         index=np.arange(1, count_3d + 1),
     )
 
-    two_largest = np.argsort(component_sizes_3d)[-2:] + 1
+    keep_3d = np.argsort(sizes_3d)[-min(2, len(sizes_3d)):] + 1
+    lung_mask = np.isin(labels_3d, keep_3d)
+
+    smooth_field = ndimage.gaussian_filter(
+        lung_mask.astype(np.float32),
+        sigma=1.1,
+    )
 
     spacing = np.asarray(
         nii.header.get_zooms()[:3],
         dtype=np.float32,
     ) * np.array([step_xy, step_xy, step_z], dtype=np.float32)
 
-    component_meshes = []
+    mid_x = lung_mask.shape[0] // 2
 
-    # Determine left/right by component centroid in the x direction.
-    component_info = []
+    left_field = smooth_field.copy()
+    left_field[mid_x:, :, :] = 0.0
 
-    for component_id in two_largest:
-        component_mask = labels_3d == component_id
-        centroid_x = float(np.argwhere(component_mask)[:, 0].mean())
-        component_info.append((component_id, centroid_x))
+    right_field = smooth_field.copy()
+    right_field[:mid_x, :, :] = 0.0
 
-    component_info.sort(key=lambda item: item[1])
+    meshes = []
 
-    # Depending on image orientation, the lower-x component appears on one
-    # side of the screen. We label them visually rather than diagnostically.
-    mesh_specs = [
-        (component_info[0][0], "#5C7CFA", "Lung A"),
-        (component_info[1][0], "#22B8CF", "Lung B"),
-    ]
+    for field, color, name in [
+        (left_field, "#22B8CF", "Left lung"),
+        (right_field, "#5C7CFA", "Right lung"),
+    ]:
+        if float(field.max()) < 0.45:
+            continue
 
-    all_vertices = []
-    temporary_meshes = []
-
-    for component_id, color, name in mesh_specs:
-        component_mask = labels_3d == component_id
-
-        # Gentle Gaussian smoothing; enough to remove stair steps while
-        # retaining the tapered apex and diaphragmatic base.
-        scalar_field = ndimage.gaussian_filter(
-            component_mask.astype(np.float32),
-            sigma=(0.75, 0.75, 0.65),
-        )
-
-        vertices, faces, _, _ = measure.marching_cubes(
-            scalar_field,
-            level=0.42,
+        verts, faces, _, _ = measure.marching_cubes(
+            field,
+            level=0.45,
             spacing=tuple(spacing),
             step_size=1,
             allow_degenerate=False,
         )
 
-        all_vertices.append(vertices)
-        temporary_meshes.append((vertices, faces, color, name))
-
-    # Center the full anatomy for a clean camera view.
-    combined_vertices = np.vstack(all_vertices)
-    center = combined_vertices.mean(axis=0)
-    z_min = float(combined_vertices[:, 2].min())
-
-    figure = go.Figure()
-
-    for vertices, faces, color, name in temporary_meshes:
-        centered = vertices.copy()
-        centered[:, 0] -= center[0]
-        centered[:, 1] -= center[1]
-        centered[:, 2] -= z_min
-
-        # Very mild AP compression reflects the natural thoracic profile
-        # and avoids the balloon-like appearance of the previous rendering.
-        centered[:, 1] *= 0.88
-
-        figure.add_trace(
+        meshes.append(
             go.Mesh3d(
-                x=centered[:, 0],
-                y=centered[:, 1],
-                z=centered[:, 2],
+                x=verts[:, 0],
+                y=verts[:, 1],
+                z=verts[:, 2],
                 i=faces[:, 0],
                 j=faces[:, 1],
                 k=faces[:, 2],
                 name=name,
                 color=color,
-                opacity=0.88,
+                opacity=0.82,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.24,
-                    diffuse=0.86,
-                    specular=0.48,
-                    roughness=0.34,
-                    fresnel=0.12,
+                    ambient=0.28,
+                    diffuse=0.82,
+                    specular=0.52,
+                    roughness=0.28,
+                    fresnel=0.16,
                 ),
-                lightposition=dict(x=-80, y=-140, z=240),
+                lightposition=dict(x=150, y=200, z=260),
                 hovertemplate=f"{name}<extra></extra>",
                 showscale=False,
             )
         )
 
-    # Add a subtle centerline to help viewers understand orientation.
-    max_z = float(
-        max(
-            np.max(np.asarray(trace.z, dtype=float))
-            for trace in figure.data
+    if len(meshes) < 2:
+        raise RuntimeError(
+            "A recognizable two-lung surface could not be created from this scan."
         )
-    )
 
-    figure.add_trace(
-        go.Scatter3d(
-            x=[0, 0],
-            y=[0, 0],
-            z=[0, max_z],
-            mode="lines",
-            line=dict(
-                color="rgba(80,90,110,0.22)",
-                width=3,
-                dash="dot",
-            ),
-            hoverinfo="skip",
-            showlegend=False,
-        )
-    )
+    figure = go.Figure(meshes)
 
     figure.update_layout(
-        height=650,
-        margin=dict(l=0, r=0, t=34, b=0),
+        height=620,
+        margin=dict(l=0, r=0, t=42, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=True,
@@ -792,7 +719,6 @@ def create_3d(path):
             y=1.01,
             xanchor="center",
             x=0.5,
-            bgcolor="rgba(255,255,255,0.72)",
         ),
         scene=dict(
             aspectmode="data",
@@ -800,12 +726,8 @@ def create_3d(path):
             xaxis=dict(visible=False),
             yaxis=dict(visible=False),
             zaxis=dict(visible=False),
-
-            # Frontal-oblique view: z is vertical, rather than looking
-            # down from above as in the earlier version.
             camera=dict(
-                eye=dict(x=0.15, y=-2.35, z=0.30),
-                center=dict(x=0, y=0, z=0),
+                eye=dict(x=1.35, y=1.70, z=0.95),
                 up=dict(x=0, y=0, z=1),
             ),
         ),
