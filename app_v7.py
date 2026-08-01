@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from huggingface_hub import hf_hub_download
 from scipy import ndimage
-from skimage import measure
 
 
 # ============================================================
@@ -139,8 +138,7 @@ ANATOMY = {
         "fa": "فضاهای جنب",
         "priority": "high",
         "window": "lung",
-        "fraction": 0.10,
-        "range": (0.00, 0.22),
+        "fraction": 0.42,
         "note_en": "Possible pleural-fluid pattern",
         "note_fa": "الگوی احتمالی مایع پلور",
         "inspect_en": ["Pleural effusion", "Pneumothorax", "Pleural thickening", "Pleural mass"],
@@ -159,7 +157,6 @@ ANATOMY = {
         "priority": "high",
         "window": "lung",
         "fraction": 0.50,
-        "range": (0.20, 0.78),
         "note_en": "Possible collapse or opacity pattern",
         "note_fa": "الگوی احتمالی کلاپس یا کدورت",
         "inspect_en": ["Atelectasis", "Consolidation", "Ground-glass opacity", "Diffuse opacity"],
@@ -177,8 +174,7 @@ ANATOMY = {
         "fa": "راه‌های هوایی",
         "priority": "medium",
         "window": "lung",
-        "fraction": 0.35,
-        "range": (0.25, 0.68),
+        "fraction": 0.58,
         "note_en": "Possible bronchial-wall change",
         "note_fa": "تغییر احتمالی دیواره برونش",
         "inspect_en": ["Wall thickening", "Bronchiectasis", "Mucus plugging", "Airway narrowing"],
@@ -196,8 +192,7 @@ ANATOMY = {
         "fa": "ندول‌های ریوی",
         "priority": "medium",
         "window": "lung",
-        "fraction": 0.55,
-        "range": (0.18, 0.80),
+        "fraction": 0.52,
         "note_en": "Small focal region worth inspecting",
         "note_fa": "ناحیه کانونی کوچک نیازمند بررسی",
         "inspect_en": ["Solid nodules", "Subsolid nodules", "Calcified nodules", "Multiplicity"],
@@ -215,9 +210,7 @@ ANATOMY = {
         "fa": "قلب و پریکارد",
         "priority": "medium",
         "window": "soft",
-        "fraction": 0.55,
-        "range": (0.34, 0.72),
-        "range": (0.42, 0.74),
+        "fraction": 0.38,
         "note_en": "Cardiac and pericardial review",
         "note_fa": "بررسی قلب و پریکارد",
         "inspect_en": ["Cardiac size", "Pericardial fluid", "Coronary calcification", "Cardiac contour"],
@@ -252,8 +245,7 @@ ANATOMY = {
         "fa": "استخوان‌ها",
         "priority": "routine",
         "window": "bone",
-        "fraction": 0.55,
-        "range": (0.00, 1.00),
+        "fraction": 0.48,
         "note_en": "Routine skeletal review",
         "note_fa": "بررسی روتین اسکلت",
         "inspect_en": ["Ribs", "Vertebrae", "Sternum", "Focal bone lesions"],
@@ -271,8 +263,7 @@ ANATOMY = {
         "fa": "بخش فوقانی شکم",
         "priority": "routine",
         "window": "soft",
-        "fraction": 0.90,
-        "range": (0.76, 1.00),
+        "fraction": 0.12,
         "note_en": "Review included upper-abdominal structures",
         "note_fa": "بررسی ساختارهای فوقانی شکم",
         "inspect_en": ["Liver", "Adrenal glands", "Spleen", "Upper kidneys"],
@@ -530,116 +521,83 @@ def get_slice(nii, z, vmin, vmax):
     return np.flipud(image.T)
 
 
-@st.cache_data(show_spinner="Creating a lightweight 3D lung surface…")
+@st.cache_data(show_spinner="Creating lightweight 3D view…")
 def create_3d(path):
-    """Build a lightweight, recognizable two-lung surface without exhausting memory."""
     nii = nib.as_closest_canonical(nib.load(path))
+    step = 5
 
-    # Aggressive downsampling keeps Streamlit Cloud stable.
-    step = 6
-    raw = np.asarray(nii.dataobj[::step, ::step, ::step], dtype=np.float32)
+    raw = np.asarray(
+        nii.dataobj[::step, ::step, ::step],
+        dtype=np.float32,
+    )
 
-    # CT-RATE stores values as 0..4095; convert approximately to Hounsfield units.
-    if float(np.nanmin(raw)) >= 0 and float(np.nanmax(raw)) > 3000:
+    if raw.min() >= 0 and raw.max() > 3000:
         raw -= 1024.0
 
-    raw = np.nan_to_num(raw, nan=-1000.0)
+    air = (raw > -1000) & (raw < -400)
 
-    # Air-like voxels include lungs and air outside the patient.
-    air = (raw > -1000) & (raw < -350)
-
-    # Remove all air connected to the volume border.
     boundary = np.zeros_like(air, dtype=bool)
-    boundary[0, :, :] = boundary[-1, :, :] = True
-    boundary[:, 0, :] = boundary[:, -1, :] = True
+    boundary[0] = boundary[-1] = True
+    boundary[:, 0] = boundary[:, -1] = True
     boundary[:, :, 0] = boundary[:, :, -1] = True
-    outside = ndimage.binary_propagation(boundary, mask=air)
-    internal_air = air & (~outside)
 
-    # Clean small holes/noise while retaining lung contours.
-    internal_air = ndimage.binary_closing(internal_air, iterations=1)
-    labels, count = ndimage.label(internal_air)
+    internal = air & ~ndimage.binary_propagation(
+        boundary,
+        mask=air,
+    )
+
+    labels, count = ndimage.label(internal)
+
     if count == 0:
-        raise RuntimeError("No internal lung-like air regions were detected.")
+        raise RuntimeError("No internal air-space regions were detected.")
 
-    sizes = ndimage.sum(internal_air, labels, index=np.arange(1, count + 1))
-    keep = np.argsort(sizes)[-min(6, len(sizes)):] + 1
-    lung_mask = np.isin(labels, keep)
+    sizes = ndimage.sum(
+        internal,
+        labels,
+        index=np.arange(1, count + 1),
+    )
 
-    # Split at the body midline so the two lungs can have distinct surfaces/colors.
-    mid_x = lung_mask.shape[0] // 2
-    left_mask = lung_mask.copy()
-    left_mask[mid_x:, :, :] = False
-    right_mask = lung_mask.copy()
-    right_mask[:mid_x, :, :] = False
+    keep = np.argsort(sizes)[-min(5, len(sizes)):] + 1
+    points = np.argwhere(np.isin(labels, keep))
 
-    spacing = np.asarray(nii.header.get_zooms()[:3], dtype=np.float32) * step
-    meshes = []
-
-    for mask, color, name in [
-        (left_mask, "#43B9E8", "Left lung"),
-        (right_mask, "#6E7DE8", "Right lung"),
-    ]:
-        if int(mask.sum()) < 100:
-            continue
-
-        verts, faces, _, _ = measure.marching_cubes(
-            mask.astype(np.float32),
-            level=0.5,
-            spacing=tuple(spacing),
-            step_size=1,
-            allow_degenerate=False,
-        )
-
-        meshes.append(
-            go.Mesh3d(
-                x=verts[:, 0],
-                y=verts[:, 1],
-                z=verts[:, 2],
-                i=faces[:, 0],
-                j=faces[:, 1],
-                k=faces[:, 2],
-                name=name,
-                color=color,
-                opacity=0.72,
-                flatshading=False,
-                lighting=dict(
-                    ambient=0.34,
-                    diffuse=0.78,
-                    specular=0.42,
-                    roughness=0.38,
-                    fresnel=0.12,
-                ),
-                lightposition=dict(x=140, y=180, z=260),
-                hovertemplate=f"{name}<extra></extra>",
-                showscale=False,
+    if len(points) > 10000:
+        points = points[
+            np.random.default_rng(42).choice(
+                len(points),
+                10000,
+                replace=False,
             )
+        ]
+
+    xyz = points * np.asarray(
+        nii.header.get_zooms()[:3]
+    ) * step
+
+    figure = go.Figure(
+        go.Scatter3d(
+            x=xyz[:, 0],
+            y=xyz[:, 1],
+            z=xyz[:, 2],
+            mode="markers",
+            marker=dict(
+                size=2.1,
+                opacity=.24,
+                color=xyz[:, 2],
+                colorscale="Turbo",
+                showscale=False,
+            ),
+            hoverinfo="skip",
         )
+    )
 
-    if not meshes:
-        raise RuntimeError("A stable lung surface could not be created from this scan.")
-
-    figure = go.Figure(meshes)
     figure.update_layout(
-        height=610,
-        margin=dict(l=0, r=0, t=45, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.01,
-            xanchor="center",
-            x=0.5,
-        ),
+        height=520,
+        margin=dict(l=0, r=0, t=15, b=0),
         scene=dict(
             aspectmode="data",
-            bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(title="Left–right", showgrid=False, zeroline=False, showbackground=False),
-            yaxis=dict(title="Front–back", showgrid=False, zeroline=False, showbackground=False),
-            zaxis=dict(title="Head–feet", showgrid=False, zeroline=False, showbackground=False),
-            camera=dict(eye=dict(x=1.45, y=1.55, z=1.05)),
+            xaxis_title="Left–right",
+            yaxis_title="Front–back",
+            zaxis_title="Head–feet",
         ),
     )
 
@@ -744,9 +702,6 @@ default_slice = int(
     selected_data["fraction"] * (number_of_slices - 1)
 )
 
-range_start = int(selected_data["range"][0] * (number_of_slices - 1))
-range_end = int(selected_data["range"][1] * (number_of_slices - 1))
-
 window_ranges = {
     "lung": (-1000, 400),
     "soft": (-150, 250),
@@ -776,11 +731,7 @@ with viewer_col:
     st.subheader(t["viewer"])
 
     st.markdown(
-        f"**Representative {t['slice_label'].lower()}: {default_slice + 1} / {number_of_slices}**"
-    )
-    st.caption(
-        f"Suggested review range: {range_start + 1}–{range_end + 1}. "
-        "This is a starting point, not the location of a confirmed abnormality."
+        f"**{t['slice_label']} {default_slice + 1} / {number_of_slices}**"
     )
 
     slice_index = st.slider(
