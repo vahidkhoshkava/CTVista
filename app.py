@@ -1,4 +1,3 @@
-
 import os
 
 import nibabel as nib
@@ -698,7 +697,7 @@ def create_3d(path):
     # figure lightweight for Streamlit Cloud/browser — the marching-cubes
     # step above can stay fine-grained for detail, then this trims it back
     # down, which looks far smoother than simply coarsening the voxel grid.
-    max_faces_per_lung = 9000
+    max_faces_per_lung = 12000
 
     for component_id, color, name in mesh_specs:
         component_mask = labels_3d == component_id
@@ -737,13 +736,20 @@ def create_3d(path):
             except Exception:
                 pass  # fall back to the un-decimated (still smoothed) mesh
 
+        # Decimation can leave a handful of duplicate/degenerate faces with
+        # a flipped normal, which shows up as a "shattered glass" sparkle
+        # under specular light. Cleaning + re-fixing normals here removes
+        # that almost entirely; the material tweak below removes the rest.
+        mesh.merge_vertices()
+        mesh.remove_infinite_values()
         mesh.fix_normals()
 
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
         faces = np.asarray(mesh.faces, dtype=np.int32)
+        vertex_normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
 
         all_vertices.append(vertices)
-        temporary_meshes.append((vertices, faces, color, name))
+        temporary_meshes.append((vertices, faces, color, name, vertex_normals))
 
     # Center the full anatomy for a clean camera view.
     combined_vertices = np.vstack(all_vertices)
@@ -780,11 +786,21 @@ def create_3d(path):
     )
 
     color_scales = {
-        "#5C7CFA": [[0.0, "#2C3E8C"], [0.55, "#5C7CFA"], [1.0, "#B6C6FF"]],
-        "#22B8CF": [[0.0, "#0B5F70"], [0.55, "#22B8CF"], [1.0, "#8FE9F5"]],
+        "#5C7CFA": [
+            [0.0, "#160F4D"],
+            [0.35, "#4433C4"],
+            [0.7, "#5C7CFA"],
+            [1.0, "#D6DEFF"],
+        ],
+        "#22B8CF": [
+            [0.0, "#04313D"],
+            [0.35, "#0B8793"],
+            [0.7, "#22B8CF"],
+            [1.0, "#A9F3FA"],
+        ],
     }
 
-    for vertices, faces, color, name in temporary_meshes:
+    for vertices, faces, color, name, vertex_normals in temporary_meshes:
         centered = vertices.copy()
         centered[:, 0] -= center[0]
         centered[:, 1] -= center[1]
@@ -800,6 +816,14 @@ def create_3d(path):
         height_fraction = np.clip((centered[:, 2] - centered[:, 2].min()) /
                                    max(z_span, 1e-3), 0, 1)
 
+        # Fake rim-light: vertices whose normal points roughly sideways
+        # relative to the camera (small y-component, since the camera
+        # looks in mostly from -y) sit on the model's silhouette. Brighten
+        # those a touch for the glowing-edge look seen in polished medical
+        # renders — pure vertex-colour trick, no extra geometry.
+        rim = np.clip(1.0 - np.abs(vertex_normals[:, 1]), 0.0, 1.0) ** 3
+        blended_intensity = np.clip(height_fraction * 0.8 + rim * 0.45, 0, 1)
+
         figure.add_trace(
             go.Mesh3d(
                 x=centered[:, 0],
@@ -809,18 +833,18 @@ def create_3d(path):
                 j=faces[:, 1],
                 k=faces[:, 2],
                 name=name,
-                intensity=height_fraction,
+                intensity=blended_intensity,
                 colorscale=color_scales.get(color, color),
                 cmin=0,
                 cmax=1,
                 opacity=0.97,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.32,
-                    diffuse=0.82,
-                    specular=0.4,
-                    roughness=0.42,
-                    fresnel=0.18,
+                    ambient=0.38,
+                    diffuse=0.88,
+                    specular=0.12,
+                    roughness=0.62,
+                    fresnel=0.05,
                 ),
                 lightposition=dict(x=-80, y=-140, z=240),
                 hovertemplate=f"{name}<extra></extra>",
