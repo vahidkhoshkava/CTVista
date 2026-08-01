@@ -1,0 +1,9 @@
+gradio>=5.0,<7
+huggingface_hub>=0.23
+nibabel
+numpy
+pandas
+scipy
+plotly
+matplotlib
+pillow
