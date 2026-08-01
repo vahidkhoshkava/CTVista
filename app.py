@@ -1,4 +1,3 @@
-
 import os
 
 import nibabel as nib
@@ -61,9 +60,9 @@ TEXT = {
         "generate_draft": "Generate draft findings",
         "draft_empty": "Review at least one region before generating the draft.",
         "three_d": "3D Anatomical Overview",
-        "generate_3d": "Generate lightweight 3D overview",
+        "generate_3d": "Generate 3D anatomical overview",
         "three_note": (
-            "Approximate air-space visualization for demonstration—not clinical segmentation."
+            "CT-derived lung surface with simplified central airway orientation—not clinical segmentation."
         ),
         "value": "Why CTVista matters",
         "values": [
@@ -110,10 +109,10 @@ TEXT = {
         "draft": "پیش‌نویس هوشمند گزارش",
         "generate_draft": "ایجاد پیش‌نویس یافته‌ها",
         "draft_empty": "پیش از ایجاد پیش‌نویس، حداقل یک ناحیه را بررسی کنید.",
-        "three_d": "نمای کلی سه‌بعدی اختیاری",
-        "generate_3d": "ایجاد نمای سه‌بعدی سبک",
+        "three_d": "نمای کلی سه‌بعدی آناتومیک",
+        "generate_3d": "ایجاد نمای سه‌بعدی آناتومیک",
         "three_note": (
-            "نمایش تقریبی فضای هوادار ریه برای نسخه نمایشی است، نه تقسیم‌بندی بالینی."
+            "نمای آناتومیک استخراج‌شده از سی‌تی با کمک هوش مصنوعی صرفاً برای نمایش است، نه تقسیم‌بندی بالینی."
         ),
         "value": "چرا CTVista اهمیت دارد؟",
         "values": [
@@ -439,6 +438,12 @@ st.markdown(
         border-radius: 999px;
     }
 
+    details[data-testid="stExpander"] > summary p {
+        font-size: 1.08rem !important;
+        font-weight: 750 !important;
+    }
+
+
     @media (max-width: 768px) {
         .hero {
             padding: 18px;
@@ -530,101 +535,234 @@ def get_slice(nii, z, vmin, vmax):
     return np.flipud(image.T)
 
 
-@st.cache_data(show_spinner="Creating a lightweight 3D lung surface…")
+
+
+
+@st.cache_data(show_spinner="Creating a professional 3D lung overview…")
 def create_3d(path):
-    """Build a lightweight, recognizable two-lung surface without exhausting memory."""
+    """
+    Professional investor-demo visualization.
+
+    The lung surfaces are extracted from the CT. Only the trachea and main
+    bronchi are added as a simple orientation aid. No artificial distal
+    airway tree is shown.
+    """
     nii = nib.as_closest_canonical(nib.load(path))
 
-    # Aggressive downsampling keeps Streamlit Cloud stable.
-    step = 6
-    raw = np.asarray(nii.dataobj[::step, ::step, ::step], dtype=np.float32)
+    step_xy = 3
+    step_z = 2
 
-    # CT-RATE stores values as 0..4095; convert approximately to Hounsfield units.
-    if float(np.nanmin(raw)) >= 0 and float(np.nanmax(raw)) > 3000:
-        raw -= 1024.0
+    volume = np.asarray(
+        nii.dataobj[::step_xy, ::step_xy, ::step_z],
+        dtype=np.float32,
+    )
 
-    raw = np.nan_to_num(raw, nan=-1000.0)
+    if float(np.nanmin(volume)) >= 0 and float(np.nanmax(volume)) > 3000:
+        volume -= 1024.0
 
-    # Air-like voxels include lungs and air outside the patient.
-    air = (raw > -1000) & (raw < -350)
+    volume = np.nan_to_num(volume, nan=-1000.0)
+    air_mask = volume < -400
+    lung_mask = np.zeros_like(air_mask, dtype=bool)
 
-    # Remove all air connected to the volume border.
-    boundary = np.zeros_like(air, dtype=bool)
-    boundary[0, :, :] = boundary[-1, :, :] = True
-    boundary[:, 0, :] = boundary[:, -1, :] = True
-    boundary[:, :, 0] = boundary[:, :, -1] = True
-    outside = ndimage.binary_propagation(boundary, mask=air)
-    internal_air = air & (~outside)
+    for z_index in range(air_mask.shape[2]):
+        slice_air = air_mask[:, :, z_index]
+        labels, count = ndimage.label(slice_air)
 
-    # Clean small holes/noise while retaining lung contours.
-    internal_air = ndimage.binary_closing(internal_air, iterations=1)
-    labels, count = ndimage.label(internal_air)
-    if count == 0:
-        raise RuntimeError("No internal lung-like air regions were detected.")
-
-    sizes = ndimage.sum(internal_air, labels, index=np.arange(1, count + 1))
-    keep = np.argsort(sizes)[-min(6, len(sizes)):] + 1
-    lung_mask = np.isin(labels, keep)
-
-    # Split at the body midline so the two lungs can have distinct surfaces/colors.
-    mid_x = lung_mask.shape[0] // 2
-    left_mask = lung_mask.copy()
-    left_mask[mid_x:, :, :] = False
-    right_mask = lung_mask.copy()
-    right_mask[:mid_x, :, :] = False
-
-    spacing = np.asarray(nii.header.get_zooms()[:3], dtype=np.float32) * step
-    meshes = []
-
-    for mask, color, name in [
-        (left_mask, "#43B9E8", "Left lung"),
-        (right_mask, "#6E7DE8", "Right lung"),
-    ]:
-        if int(mask.sum()) < 100:
+        if count == 0:
             continue
 
-        verts, faces, _, _ = measure.marching_cubes(
-            mask.astype(np.float32),
-            level=0.5,
+        border_labels = np.unique(
+            np.concatenate(
+                [
+                    labels[0, :],
+                    labels[-1, :],
+                    labels[:, 0],
+                    labels[:, -1],
+                ]
+            )
+        )
+
+        internal = slice_air & (~np.isin(labels, border_labels))
+        internal_labels, internal_count = ndimage.label(internal)
+
+        if internal_count == 0:
+            continue
+
+        sizes = ndimage.sum(
+            internal,
+            internal_labels,
+            index=np.arange(1, internal_count + 1),
+        )
+
+        selected_labels = []
+
+        for size_index in np.argsort(sizes)[::-1]:
+            label_id = int(size_index + 1)
+            size = float(sizes[size_index])
+
+            if size < 120:
+                continue
+
+            coords = np.argwhere(internal_labels == label_id)
+            centroid = coords.mean(axis=0)
+
+            if not (
+                0.10 * internal.shape[0] < centroid[0] < 0.90 * internal.shape[0]
+                and 0.08 * internal.shape[1] < centroid[1] < 0.92 * internal.shape[1]
+            ):
+                continue
+
+            selected_labels.append(label_id)
+
+            if len(selected_labels) == 2:
+                break
+
+        if selected_labels:
+            selected = np.isin(internal_labels, selected_labels)
+            selected = ndimage.binary_fill_holes(selected)
+            selected = ndimage.binary_closing(
+                selected,
+                structure=np.ones((3, 3), dtype=bool),
+                iterations=1,
+            )
+            lung_mask[:, :, z_index] = selected
+
+    lung_mask = ndimage.binary_closing(
+        lung_mask,
+        structure=np.ones((3, 3, 3), dtype=bool),
+        iterations=1,
+    )
+    lung_mask = ndimage.binary_opening(
+        lung_mask,
+        structure=np.ones((2, 2, 2), dtype=bool),
+        iterations=1,
+    )
+
+    labels_3d, count_3d = ndimage.label(lung_mask)
+
+    if count_3d < 2:
+        raise RuntimeError("Two stable lung regions could not be separated.")
+
+    sizes_3d = ndimage.sum(
+        lung_mask,
+        labels_3d,
+        index=np.arange(1, count_3d + 1),
+    )
+
+    two_largest = np.argsort(sizes_3d)[-2:] + 1
+
+    spacing = np.asarray(
+        nii.header.get_zooms()[:3],
+        dtype=np.float32,
+    ) * np.array([step_xy, step_xy, step_z], dtype=np.float32)
+
+    component_info = []
+
+    for component_id in two_largest:
+        mask = labels_3d == component_id
+        centroid_x = float(np.argwhere(mask)[:, 0].mean())
+        component_info.append((component_id, centroid_x))
+
+    component_info.sort(key=lambda item: item[1])
+
+    specs = [
+        (component_info[0][0], "#6C63FF", "Left lung"),
+        (component_info[1][0], "#20C4CB", "Right lung"),
+    ]
+
+    temporary = []
+    all_vertices = []
+
+    for component_id, color, name in specs:
+        component_mask = labels_3d == component_id
+
+        field = ndimage.gaussian_filter(
+            component_mask.astype(np.float32),
+            sigma=(0.72, 0.72, 0.58),
+        )
+
+        vertices, faces, _, _ = measure.marching_cubes(
+            field,
+            level=0.42,
             spacing=tuple(spacing),
             step_size=1,
             allow_degenerate=False,
         )
 
-        meshes.append(
+        temporary.append((vertices, faces, color, name))
+        all_vertices.append(vertices)
+
+    combined = np.vstack(all_vertices)
+    center = combined.mean(axis=0)
+    z_min = float(combined[:, 2].min())
+
+    figure = go.Figure()
+    centered_meshes = []
+
+    for vertices, faces, color, name in temporary:
+        transformed = vertices.copy()
+        transformed[:, 0] -= center[0]
+        transformed[:, 1] -= center[1]
+        transformed[:, 2] -= z_min
+        transformed[:, 1] *= 0.90
+
+        centered_meshes.append(transformed)
+
+        figure.add_trace(
             go.Mesh3d(
-                x=verts[:, 0],
-                y=verts[:, 1],
-                z=verts[:, 2],
+                x=transformed[:, 0],
+                y=transformed[:, 1],
+                z=transformed[:, 2],
                 i=faces[:, 0],
                 j=faces[:, 1],
                 k=faces[:, 2],
                 name=name,
                 color=color,
-                opacity=0.72,
+                opacity=0.76,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.34,
-                    diffuse=0.78,
-                    specular=0.42,
-                    roughness=0.38,
-                    fresnel=0.12,
+                    ambient=0.30,
+                    diffuse=0.82,
+                    specular=0.38,
+                    roughness=0.40,
+                    fresnel=0.10,
                 ),
-                lightposition=dict(x=140, y=180, z=260),
+                lightposition=dict(x=-100, y=-170, z=260),
                 hovertemplate=f"{name}<extra></extra>",
                 showscale=False,
             )
         )
 
-    if not meshes:
-        raise RuntimeError("A stable lung surface could not be created from this scan.")
+    all_centered = np.vstack(centered_meshes)
+    total_height = float(all_centered[:, 2].max() - all_centered[:, 2].min())
+    total_width = float(all_centered[:, 0].max() - all_centered[:, 0].min())
 
-    figure = go.Figure(meshes)
+    # Simple central airway orientation aid.
+    carina = np.array([0.0, -2.0, 0.72 * total_height])
+    trachea_top = np.array([0.0, -2.0, 1.10 * total_height])
+    left_main = np.array([-0.18 * total_width, -1.0, 0.58 * total_height])
+    right_main = np.array([0.18 * total_width, -1.0, 0.58 * total_height])
+
+    figure.add_trace(
+        go.Scatter3d(
+            x=[trachea_top[0], carina[0], None, carina[0], left_main[0], None, carina[0], right_main[0]],
+            y=[trachea_top[1], carina[1], None, carina[1], left_main[1], None, carina[1], right_main[1]],
+            z=[trachea_top[2], carina[2], None, carina[2], left_main[2], None, carina[2], right_main[2]],
+            mode="lines",
+            line=dict(
+                color="#38D9F9",
+                width=10,
+            ),
+            name="Trachea and main bronchi",
+            hoverinfo="skip",
+        )
+    )
+
     figure.update_layout(
-        height=610,
-        margin=dict(l=0, r=0, t=45, b=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        height=650,
+        margin=dict(l=0, r=0, t=38, b=0),
+        paper_bgcolor="#07101F",
+        plot_bgcolor="#07101F",
         showlegend=True,
         legend=dict(
             orientation="h",
@@ -632,14 +770,20 @@ def create_3d(path):
             y=1.01,
             xanchor="center",
             x=0.5,
+            font=dict(color="white"),
+            bgcolor="rgba(7,16,31,0.65)",
         ),
         scene=dict(
             aspectmode="data",
-            bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(title="Left–right", showgrid=False, zeroline=False, showbackground=False),
-            yaxis=dict(title="Front–back", showgrid=False, zeroline=False, showbackground=False),
-            zaxis=dict(title="Head–feet", showgrid=False, zeroline=False, showbackground=False),
-            camera=dict(eye=dict(x=1.45, y=1.55, z=1.05)),
+            bgcolor="#07101F",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            camera=dict(
+                eye=dict(x=0.08, y=-2.55, z=0.22),
+                center=dict(x=0, y=0, z=0),
+                up=dict(x=0, y=0, z=1),
+            ),
         ),
     )
 
