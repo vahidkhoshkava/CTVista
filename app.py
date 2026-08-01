@@ -651,7 +651,7 @@ st.markdown(
                 </div>
 
                 <div class="developer-role">
-                    {"Developer" if not is_farsi else "بنیان‌گذار و توسعه‌دهنده"}
+                    {"Founder & Developer" if not is_farsi else "بنیان‌گذار و توسعه‌دهنده"}
                 </div>
             </div>
         </div>
