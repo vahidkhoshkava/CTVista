@@ -5,7 +5,6 @@ import nibabel as nib
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-import trimesh
 from huggingface_hub import hf_hub_download
 from scipy import ndimage
 from skimage import measure
@@ -694,22 +693,14 @@ def create_3d(path):
     all_vertices = []
     temporary_meshes = []
 
-    # Target triangle budget per lung. This is what actually keeps the
-    # figure lightweight for Streamlit Cloud/browser — the marching-cubes
-    # step above can stay fine-grained for detail, then this trims it back
-    # down, which looks far smoother than simply coarsening the voxel grid.
-    max_faces_per_lung = 9000
-
     for component_id, color, name in mesh_specs:
         component_mask = labels_3d == component_id
 
-        # Gaussian pre-smoothing on the binary mask. This is what removes
-        # the "tree ring" / stair-step banding that comes from the coarse
-        # axial (z) sampling — the previous sigma was too small relative
-        # to the z step to fully erase it.
+        # Gentle Gaussian smoothing; enough to remove stair steps while
+        # retaining the tapered apex and diaphragmatic base.
         scalar_field = ndimage.gaussian_filter(
             component_mask.astype(np.float32),
-            sigma=(1.1, 1.1, 1.0),
+            sigma=(0.75, 0.75, 0.65),
         )
 
         vertices, faces, _, _ = measure.marching_cubes(
@@ -720,28 +711,6 @@ def create_3d(path):
             allow_degenerate=False,
         )
 
-        # A second smoothing pass directly on the mesh geometry. Taubin
-        # smoothing (unlike plain Laplacian) doesn't shrink the surface,
-        # so the lung keeps its size while the residual banding/noise from
-        # the CT resampling is smoothed away.
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-        trimesh.smoothing.filter_taubin(mesh, iterations=18, lamb=0.5, nu=-0.53)
-
-        # Decimate to a fixed triangle budget so file/browser weight stays
-        # predictable regardless of scan resolution.
-        if len(mesh.faces) > max_faces_per_lung:
-            try:
-                mesh = mesh.simplify_quadric_decimation(
-                    face_count=max_faces_per_lung,
-                )
-            except Exception:
-                pass  # fall back to the un-decimated (still smoothed) mesh
-
-        mesh.fix_normals()
-
-        vertices = np.asarray(mesh.vertices, dtype=np.float32)
-        faces = np.asarray(mesh.faces, dtype=np.int32)
-
         all_vertices.append(vertices)
         temporary_meshes.append((vertices, faces, color, name))
 
@@ -749,40 +718,8 @@ def create_3d(path):
     combined_vertices = np.vstack(all_vertices)
     center = combined_vertices.mean(axis=0)
     z_min = float(combined_vertices[:, 2].min())
-    z_span = float(combined_vertices[:, 2].max()) - z_min
 
     figure = go.Figure()
-
-    # Soft contact-shadow ellipse under the lungs — a cheap way (one flat
-    # disc, ~60 vertices) to ground the model and make it read as a solid
-    # object rather than a floating mesh.
-    shadow_radius_x = float(np.ptp(combined_vertices[:, 0])) * 0.62
-    shadow_radius_y = float(np.ptp(combined_vertices[:, 1])) * 0.88 * 0.55
-    theta = np.linspace(0, 2 * np.pi, 48)
-    shadow_x = shadow_radius_x * np.cos(theta)
-    shadow_y = shadow_radius_y * np.sin(theta)
-    shadow_z = np.zeros_like(theta)
-
-    figure.add_trace(
-        go.Mesh3d(
-            x=np.concatenate([[0.0], shadow_x]),
-            y=np.concatenate([[0.0], shadow_y]),
-            z=np.concatenate([[-1.5], shadow_z - 1.5]),
-            i=[0] * (len(theta) - 1),
-            j=list(range(1, len(theta))),
-            k=list(range(2, len(theta) + 1)),
-            color="rgb(30,35,50)",
-            opacity=0.16,
-            hoverinfo="skip",
-            showlegend=False,
-            lighting=dict(ambient=1, diffuse=0, specular=0),
-        )
-    )
-
-    color_scales = {
-        "#5C7CFA": [[0.0, "#2C3E8C"], [0.55, "#5C7CFA"], [1.0, "#B6C6FF"]],
-        "#22B8CF": [[0.0, "#0B5F70"], [0.55, "#22B8CF"], [1.0, "#8FE9F5"]],
-    }
 
     for vertices, faces, color, name in temporary_meshes:
         centered = vertices.copy()
@@ -794,12 +731,6 @@ def create_3d(path):
         # and avoids the balloon-like appearance of the previous rendering.
         centered[:, 1] *= 0.88
 
-        # Subtle top-to-bottom colour gradient (darker base, lighter apex)
-        # instead of a single flat colour — this alone reads as much more
-        # "modeled" rather than a plain plastic blob, at zero extra weight.
-        height_fraction = np.clip((centered[:, 2] - centered[:, 2].min()) /
-                                   max(z_span, 1e-3), 0, 1)
-
         figure.add_trace(
             go.Mesh3d(
                 x=centered[:, 0],
@@ -809,18 +740,15 @@ def create_3d(path):
                 j=faces[:, 1],
                 k=faces[:, 2],
                 name=name,
-                intensity=height_fraction,
-                colorscale=color_scales.get(color, color),
-                cmin=0,
-                cmax=1,
-                opacity=0.97,
+                color=color,
+                opacity=0.88,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.32,
-                    diffuse=0.82,
-                    specular=0.4,
-                    roughness=0.42,
-                    fresnel=0.18,
+                    ambient=0.24,
+                    diffuse=0.86,
+                    specular=0.48,
+                    roughness=0.34,
+                    fresnel=0.12,
                 ),
                 lightposition=dict(x=-80, y=-140, z=240),
                 hovertemplate=f"{name}<extra></extra>",
@@ -876,7 +804,7 @@ def create_3d(path):
             # Frontal-oblique view: z is vertical, rather than looking
             # down from above as in the earlier version.
             camera=dict(
-                eye=dict(x=0.15, y=-2.15, z=0.35),
+                eye=dict(x=0.15, y=-2.35, z=0.30),
                 center=dict(x=0, y=0, z=0),
                 up=dict(x=0, y=0, z=1),
             ),
