@@ -660,6 +660,9 @@ render_html(
                     Vahid Khoshkava, PhD
                 </div>
 
+                <div class="developer-role">
+                    {"Developer" if not is_farsi else "توسعه‌دهنده"}
+                </div>
             </div>
         </div>
     </div>
@@ -806,62 +809,94 @@ with guide_col:
 
     st.write("")
 
-    # Clickable, table-like region list. Clicking a region updates the CT slice,
-    # display window, Selected Region card, AI Insight, and draft workflow.
-    header_cols = st.columns([0.07, 0.31, 0.44, 0.18], gap="small")
-    header_cols[0].markdown("")
-    header_cols[1].markdown(f"**{t['region']}**")
-    header_cols[2].markdown(f"**{t['ai_note']}**")
-    header_cols[3].markdown(f"**{t['status']}**")
-
-    st.markdown("<hr style='margin:0.15rem 0 0.35rem 0; opacity:0.25;'>", unsafe_allow_html=True)
+    table_html = f"""
+    <div class="review-table" dir="{direction}">
+        <div class="review-row review-header">
+            <div></div>
+            <div>{t["region"]}</div>
+            <div class="ai-note">{t["ai_note"]}</div>
+            <div class="status-cell">{t["status"]}</div>
+        </div>
+    """
 
     for region_name in ORDER:
         data = ANATOMY[region_name]
 
-        display_name = data["fa"] if is_farsi else region_name
-        note = data["note_fa"] if is_farsi else data["note_en"]
+        display_name = (
+            data["fa"]
+            if is_farsi
+            else region_name
+        )
 
-        dot_color = {
-            "high": "#d73746",
-            "medium": "#e8911e",
-            "routine": "#2a915f",
+        note = (
+            data["note_fa"]
+            if is_farsi
+            else data["note_en"]
+        )
+
+        dot_class = {
+            "high": "dot-high",
+            "medium": "dot-medium",
+            "routine": "dot-routine",
         }[data["priority"]]
 
-        is_current = region_name == st.session_state.selected_region
-        is_done = region_name in st.session_state.reviewed_regions
-        status = t["reviewed"] if is_done else t["open"]
-
-        row = st.columns([0.07, 0.31, 0.44, 0.18], gap="small")
-
-        row[0].markdown(
-            f"<div style='padding-top:0.65rem;text-align:center;'>"
-            f"<span style='display:inline-block;width:10px;height:10px;"
-            f"border-radius:50%;background:{dot_color};'></span></div>",
-            unsafe_allow_html=True,
+        status = (
+            t["reviewed"]
+            if region_name in st.session_state.reviewed_regions
+            else t["open"]
         )
 
-        if row[1].button(
-            display_name,
-            key=f"region_button_{region_name}_{language}",
-            type="primary" if is_current else "secondary",
-            width="stretch",
-        ):
-            st.session_state.selected_region = region_name
-            st.rerun()
+        table_html += f"""
+        <div class="review-row">
+            <div>
+                <span class="priority-dot {dot_class}"></span>
+            </div>
 
-        row[2].markdown(
-            f"<div style='padding-top:0.55rem;line-height:1.25;'>{note}</div>",
-            unsafe_allow_html=True,
-        )
+            <div>
+                <strong>{display_name}</strong>
+            </div>
 
-        row[3].markdown(
-            f"<div style='padding-top:0.48rem;text-align:center;'>"
-            f"<span class='status-chip'>{'✓ ' if is_done else ''}{status}</span></div>",
-            unsafe_allow_html=True,
-        )
+            <div class="ai-note">
+                {note}
+            </div>
 
-        st.markdown("<hr style='margin:0.1rem 0; opacity:0.12;'>", unsafe_allow_html=True)
+            <div class="status-cell">
+                <span class="status-chip">{status}</span>
+            </div>
+        </div>
+        """
+
+    render_html(
+        table_html + "</div>"
+    )
+
+    display_options = [
+        ANATOMY[name]["fa"] if is_farsi else name
+        for name in ORDER
+    ]
+
+    current_display_name = (
+        selected_data["fa"]
+        if is_farsi
+        else selected_name
+    )
+
+    selected_display = st.selectbox(
+        t["selected_region"],
+        display_options,
+        index=display_options.index(current_display_name),
+    )
+
+    display_to_internal = {
+        (ANATOMY[name]["fa"] if is_farsi else name): name
+        for name in ORDER
+    }
+
+    new_region = display_to_internal[selected_display]
+
+    if new_region != st.session_state.selected_region:
+        st.session_state.selected_region = new_region
+        st.rerun()
 
 
 # ---------------- AI SIMILAR CASES ----------------
