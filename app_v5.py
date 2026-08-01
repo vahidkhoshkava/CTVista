@@ -472,16 +472,6 @@ st.markdown(
 )
 
 
-def render_html(html_text):
-    """Render HTML without Markdown treating indented tags as code blocks."""
-    compact_html = "".join(
-        line.strip()
-        for line in html_text.splitlines()
-        if line.strip()
-    )
-    st.markdown(compact_html, unsafe_allow_html=True)
-
-
 # ============================================================
 # DATA FUNCTIONS
 # ============================================================
@@ -632,7 +622,7 @@ t = TEXT[language]
 is_farsi = language == "فارسی"
 direction = "rtl" if is_farsi else "ltr"
 
-render_html(
+st.markdown(
     f"""
     <div class="hero" dir="{direction}">
         <div class="hero-grid">
@@ -661,12 +651,13 @@ render_html(
                 </div>
 
                 <div class="developer-role">
-                    {"Developer" if not is_farsi else "توسعه‌دهنده"}
+                    {"Founder & Developer" if not is_farsi else "بنیان‌گذار و توسعه‌دهنده"}
                 </div>
             </div>
         </div>
     </div>
-    """
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -682,7 +673,7 @@ except Exception as error:
 
 number_of_slices = int(nii.shape[2])
 
-render_html(
+st.markdown(
     f"""
     <div class="study" dir="{direction}">
         <strong>{t["study"]}</strong>
@@ -690,7 +681,8 @@ render_html(
         &nbsp; • &nbsp; {number_of_slices} slices
         &nbsp; • &nbsp; ✅ {t["analysis"]}
     </div>
-    """
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -795,7 +787,7 @@ with guide_col:
         100 * reviewed_count / len(ORDER)
     )
 
-    render_html(
+    st.markdown(
         f"""
         <div dir="{direction}">
             <strong>{t["progress"]}</strong>
@@ -804,7 +796,8 @@ with guide_col:
                 <div class="progress-fill" style="width:{progress}%"></div>
             </div>
         </div>
-        """
+        """,
+        unsafe_allow_html=True,
     )
 
     st.write("")
@@ -866,8 +859,9 @@ with guide_col:
         </div>
         """
 
-    render_html(
-        table_html + "</div>"
+    st.markdown(
+        table_html + "</div>",
+        unsafe_allow_html=True,
     )
 
     display_options = [
@@ -973,7 +967,7 @@ review_col, insight_col, draft_col = st.columns(
 with review_col:
     st.subheader(t["selected_region"])
 
-    render_html(
+    st.markdown(
         f"""
         <div class="box" dir="{direction}">
             <h3>{display_name}</h3>
@@ -982,7 +976,8 @@ with review_col:
                 {''.join(f'<li>{item}</li>' for item in inspection_items)}
             </ul>
         </div>
-        """
+        """,
+        unsafe_allow_html=True,
     )
 
     is_reviewed = (
@@ -1005,13 +1000,14 @@ with review_col:
 with insight_col:
     st.subheader(t["insight"])
 
-    render_html(
+    st.markdown(
         f"""
         <div class="box" dir="{direction}">
             <strong>{display_name}</strong><br><br>
             {explanation}
         </div>
-        """
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -1061,13 +1057,14 @@ for column, (title, body) in zip(
     t["values"],
 ):
     with column:
-        render_html(
+        st.markdown(
             f"""
             <div class="box" dir="{direction}">
                 <strong>{title}</strong><br><br>
                 {body}
             </div>
-            """
+            """,
+            unsafe_allow_html=True,
         )
 
 
