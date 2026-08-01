@@ -60,10 +60,10 @@ TEXT = {
         "draft": "AI Draft Report",
         "generate_draft": "Generate draft findings",
         "draft_empty": "Review at least one region before generating the draft.",
-        "three_d": "3D Anatomical Overview",
-        "generate_3d": "Generate enhanced 3D overview",
+        "three_d": "Optional 3D Anatomical Overview",
+        "generate_3d": "Generate lightweight 3D overview",
         "three_note": (
-            "Stylized 3D anatomical overview with illustrative airway branching—not clinical segmentation."
+            "CT-derived lung shells with an illustrative airway overlay—not clinical airway or lung segmentation."
         ),
         "value": "Why CTVista matters",
         "values": [
@@ -110,10 +110,10 @@ TEXT = {
         "draft": "پیش‌نویس هوشمند گزارش",
         "generate_draft": "ایجاد پیش‌نویس یافته‌ها",
         "draft_empty": "پیش از ایجاد پیش‌نویس، حداقل یک ناحیه را بررسی کنید.",
-        "three_d": "نمای کلی سه‌بعدی آناتومیک",
-        "generate_3d": "ایجاد نمای سه‌بعدی پیشرفته",
+        "three_d": "نمای کلی سه‌بعدی اختیاری",
+        "generate_3d": "ایجاد نمای سه‌بعدی سبک",
         "three_note": (
-            "نمای سه‌بعدی آناتومیک و شاخه‌های راه هوایی نمایشی هستند و تقسیم‌بندی بالینی محسوب نمی‌شوند."
+            "پوسته ریه از سی‌تی استخراج شده و شبکه راه هوایی نمایشی است؛ این تصویر تقسیم‌بندی بالینی نیست."
         ),
         "value": "چرا CTVista اهمیت دارد؟",
         "values": [
@@ -439,13 +439,6 @@ st.markdown(
         border-radius: 999px;
     }
 
-    /* Emphasize the 3D section title. */
-    details[data-testid="stExpander"] > summary p {
-        font-size: 1.08rem !important;
-        font-weight: 750 !important;
-    }
-
-
     @media (max-width: 768px) {
         .hero {
             padding: 18px;
@@ -540,126 +533,191 @@ def get_slice(nii, z, vmin, vmax):
 
 
 
-
-@st.cache_data(show_spinner="Creating the enhanced 3D anatomical overview…")
+@st.cache_data(show_spinner="Creating an enhanced 3D lung and airway overview…")
 def create_3d(path):
     """
-    Lightweight cinematic investor-demo visualization.
+    Investor-demo visualization:
+    - CT-derived left and right lung shells;
+    - semi-transparent colored surfaces;
+    - stylized trachea and branching airway overlay.
 
-    The lung shells and airway tree are stylized anatomical graphics designed
-    for workflow communication. They are not clinical lung or airway
-    segmentations and must not be interpreted as patient-specific anatomy.
+    The lung shells are derived from the CT. The distal airway overlay is
+    illustrative and is not a clinical airway segmentation.
     """
+    nii = nib.as_closest_canonical(nib.load(path))
 
-    # The CT is still loaded so the visualization remains linked to the
-    # active study and benefits from Streamlit's existing cache workflow.
-    _ = nib.as_closest_canonical(nib.load(path))
+    step_xy = 3
+    step_z = 2
 
-    # ------------------------------------------------------------
-    # Parametric lung shell
-    # ------------------------------------------------------------
+    volume = np.asarray(
+        nii.dataobj[::step_xy, ::step_xy, ::step_z],
+        dtype=np.float32,
+    )
 
-    def build_lung_shell(side):
-        """
-        side = -1 for the left side of the screen, +1 for the right.
-        Creates a tall tapered shell with a medial concavity and flatter base.
-        """
-        phi = np.linspace(0.04, np.pi - 0.04, 38)
-        theta = np.linspace(0, 2 * np.pi, 46, endpoint=False)
+    if float(np.nanmin(volume)) >= 0 and float(np.nanmax(volume)) > 3000:
+        volume -= 1024.0
 
-        phi_grid, theta_grid = np.meshgrid(phi, theta, indexing="ij")
+    volume = np.nan_to_num(volume, nan=-1000.0)
+    air_mask = volume < -400
+    lung_mask = np.zeros_like(air_mask, dtype=bool)
 
-        # Tall lung proportions.
-        vertical = np.cos(phi_grid)
-        radial = np.sin(phi_grid)
+    # Slice-wise external-air removal avoids leakage through the trachea.
+    for z_index in range(air_mask.shape[2]):
+        slice_air = air_mask[:, :, z_index]
+        labels, count = ndimage.label(slice_air)
 
-        # Wider in the lower-middle region and narrower at the apex.
-        width_scale = 0.78 + 0.22 * (1 - vertical)
-        depth_scale = 0.72 + 0.12 * (1 - vertical)
+        if count == 0:
+            continue
 
-        x_local = 48.0 * radial * np.cos(theta_grid) * width_scale
-        y_local = 32.0 * radial * np.sin(theta_grid) * depth_scale
-        z_local = 95.0 * vertical
-
-        # Flatten the diaphragmatic base slightly.
-        lower_region = z_local < -55
-        z_local = np.where(
-            lower_region,
-            -55 - 0.26 * (z_local + 55),
-            z_local,
+        border_labels = np.unique(
+            np.concatenate(
+                [
+                    labels[0, :],
+                    labels[-1, :],
+                    labels[:, 0],
+                    labels[:, -1],
+                ]
+            )
         )
 
-        # Create a gentle medial indentation rather than a spherical blob.
-        medial_side = np.cos(theta_grid) * side < -0.10
-        mid_height = np.exp(-((z_local + 5) / 43) ** 2)
-        medial_notch = 14.0 * mid_height * np.clip(
-            -np.cos(theta_grid) * side,
-            0,
-            1,
-        )
-        x_local = np.where(
-            medial_side,
-            x_local + side * medial_notch,
-            x_local,
+        internal = slice_air & (~np.isin(labels, border_labels))
+        internal_labels, internal_count = ndimage.label(internal)
+
+        if internal_count == 0:
+            continue
+
+        sizes = ndimage.sum(
+            internal,
+            internal_labels,
+            index=np.arange(1, internal_count + 1),
         )
 
-        # Add subtle organic asymmetry.
-        if side < 0:
-            x_local *= 0.94
-            z_local += 2.5
-        else:
-            x_local *= 1.03
-            z_local -= 1.0
+        selected_labels = []
 
-        # Separate the lungs.
-        x = x_local + side * 58.0
-        y = y_local
-        z = z_local
+        for size_index in np.argsort(sizes)[::-1]:
+            label_id = int(size_index + 1)
+            size = float(sizes[size_index])
 
-        vertices = np.column_stack(
-            [x.ravel(), y.ravel(), z.ravel()]
+            if size < 120:
+                continue
+
+            coordinates = np.argwhere(internal_labels == label_id)
+            centroid = coordinates.mean(axis=0)
+
+            if not (
+                0.10 * internal.shape[0] < centroid[0] < 0.90 * internal.shape[0]
+                and 0.08 * internal.shape[1] < centroid[1] < 0.92 * internal.shape[1]
+            ):
+                continue
+
+            selected_labels.append(label_id)
+
+            if len(selected_labels) == 2:
+                break
+
+        if selected_labels:
+            selected_slice = np.isin(internal_labels, selected_labels)
+            selected_slice = ndimage.binary_fill_holes(selected_slice)
+            selected_slice = ndimage.binary_closing(
+                selected_slice,
+                structure=np.ones((3, 3), dtype=bool),
+                iterations=1,
+            )
+            lung_mask[:, :, z_index] = selected_slice
+
+    lung_mask = ndimage.binary_closing(
+        lung_mask,
+        structure=np.ones((3, 3, 3), dtype=bool),
+        iterations=1,
+    )
+    lung_mask = ndimage.binary_opening(
+        lung_mask,
+        structure=np.ones((2, 2, 2), dtype=bool),
+        iterations=1,
+    )
+
+    labels_3d, count_3d = ndimage.label(lung_mask)
+
+    if count_3d < 2:
+        raise RuntimeError("Two stable lung regions could not be separated.")
+
+    sizes_3d = ndimage.sum(
+        lung_mask,
+        labels_3d,
+        index=np.arange(1, count_3d + 1),
+    )
+
+    two_largest = np.argsort(sizes_3d)[-2:] + 1
+
+    spacing = np.asarray(
+        nii.header.get_zooms()[:3],
+        dtype=np.float32,
+    ) * np.array([step_xy, step_xy, step_z], dtype=np.float32)
+
+    component_info = []
+
+    for component_id in two_largest:
+        component_mask = labels_3d == component_id
+        centroid_x = float(np.argwhere(component_mask)[:, 0].mean())
+        component_info.append((component_id, centroid_x))
+
+    component_info.sort(key=lambda item: item[1])
+
+    shell_specs = [
+        (component_info[0][0], "#7C3AED", "Left lung"),
+        (component_info[1][0], "#EC4899", "Right lung"),
+    ]
+
+    temporary_meshes = []
+    all_vertices = []
+
+    for component_id, color, name in shell_specs:
+        component_mask = labels_3d == component_id
+
+        scalar_field = ndimage.gaussian_filter(
+            component_mask.astype(np.float32),
+            sigma=(0.75, 0.75, 0.65),
         )
 
-        n_phi = len(phi)
-        n_theta = len(theta)
-        faces = []
+        vertices, faces, _, _ = measure.marching_cubes(
+            scalar_field,
+            level=0.42,
+            spacing=tuple(spacing),
+            step_size=1,
+            allow_degenerate=False,
+        )
 
-        for i in range(n_phi - 1):
-            for j in range(n_theta):
-                j_next = (j + 1) % n_theta
+        temporary_meshes.append((vertices, faces, color, name))
+        all_vertices.append(vertices)
 
-                a = i * n_theta + j
-                b = i * n_theta + j_next
-                c = (i + 1) * n_theta + j
-                d = (i + 1) * n_theta + j_next
+    combined = np.vstack(all_vertices)
+    center = combined.mean(axis=0)
+    minimum_z = float(combined[:, 2].min())
 
-                faces.append((a, c, b))
-                faces.append((b, c, d))
+    centered_meshes = []
 
-        return vertices, np.asarray(faces, dtype=int)
+    for vertices, faces, color, name in temporary_meshes:
+        transformed = vertices.copy()
+        transformed[:, 0] -= center[0]
+        transformed[:, 1] -= center[1]
+        transformed[:, 2] -= minimum_z
+        transformed[:, 1] *= 0.88
 
-    left_vertices, left_faces = build_lung_shell(-1)
-    right_vertices, right_faces = build_lung_shell(1)
+        centered_meshes.append((transformed, faces, color, name))
+
+    all_centered = np.vstack([item[0] for item in centered_meshes])
+
+    x_min, y_min, z_min = all_centered.min(axis=0)
+    x_max, y_max, z_max = all_centered.max(axis=0)
+
+    total_width = x_max - x_min
+    total_depth = y_max - y_min
+    total_height = z_max - z_min
 
     figure = go.Figure()
 
-    # Transparent shells with vivid investor-demo colors.
-    shell_specs = [
-        (
-            left_vertices,
-            left_faces,
-            "#A855F7",
-            "Left lung",
-        ),
-        (
-            right_vertices,
-            right_faces,
-            "#EC4899",
-            "Right lung",
-        ),
-    ]
-
-    for vertices, faces, color, name in shell_specs:
+    # Transparent CT-derived lung shells.
+    for vertices, faces, color, name in centered_meshes:
         figure.add_trace(
             go.Mesh3d(
                 x=vertices[:, 0],
@@ -670,239 +728,148 @@ def create_3d(path):
                 k=faces[:, 2],
                 name=name,
                 color=color,
-                opacity=0.30,
+                opacity=0.34,
                 flatshading=False,
                 lighting=dict(
-                    ambient=0.28,
-                    diffuse=0.78,
-                    specular=0.58,
-                    roughness=0.28,
-                    fresnel=0.18,
+                    ambient=0.30,
+                    diffuse=0.82,
+                    specular=0.42,
+                    roughness=0.40,
+                    fresnel=0.10,
                 ),
-                lightposition=dict(
-                    x=-120,
-                    y=-180,
-                    z=250,
-                ),
+                lightposition=dict(x=-90, y=-160, z=260),
                 hovertemplate=f"{name}<extra></extra>",
                 showscale=False,
             )
         )
 
-    # ------------------------------------------------------------
-    # Airway tree
-    # ------------------------------------------------------------
+    def add_segment(start_point, end_point, width, color, name=None):
+        figure.add_trace(
+            go.Scatter3d(
+                x=[start_point[0], end_point[0]],
+                y=[start_point[1], end_point[1]],
+                z=[start_point[2], end_point[2]],
+                mode="lines",
+                line=dict(color=color, width=width),
+                name=name,
+                hoverinfo="skip",
+                showlegend=name is not None,
+            )
+        )
 
-    trunk_x = []
-    trunk_y = []
-    trunk_z = []
+    # Central trachea.
+    bifurcation = np.array([0.0, -0.05 * total_depth, 0.72 * total_height])
+    trachea_top = np.array([0.0, -0.05 * total_depth, 1.12 * total_height])
 
-    branch_x = []
-    branch_y = []
-    branch_z = []
-
-    distal_x = []
-    distal_y = []
-    distal_z = []
-
-    def append_segment(target_x, target_y, target_z, start, end):
-        target_x.extend([start[0], end[0], None])
-        target_y.extend([start[1], end[1], None])
-        target_z.extend([start[2], end[2], None])
-
-    trachea_top = np.array([0.0, -4.0, 142.0])
-    carina = np.array([0.0, -3.0, 74.0])
-
-    append_segment(
-        trunk_x,
-        trunk_y,
-        trunk_z,
+    add_segment(
         trachea_top,
-        carina,
+        bifurcation,
+        width=13,
+        color="#22D3EE",
+        name="Trachea and airways",
     )
 
-    left_main = np.array([-29.0, -1.0, 55.0])
-    right_main = np.array([29.0, -1.0, 55.0])
+    rng = np.random.default_rng(11)
 
-    append_segment(
-        trunk_x,
-        trunk_y,
-        trunk_z,
-        carina,
-        left_main,
-    )
-    append_segment(
-        trunk_x,
-        trunk_y,
-        trunk_z,
-        carina,
-        right_main,
-    )
-
-    rng = np.random.default_rng(17)
-
-    def grow_airways(
+    def grow_tree(
         origin,
         direction,
         side,
         depth,
         length,
-        generation,
+        width,
+        color,
     ):
-        if depth <= 0:
+        if depth == 0:
             return
 
-        direction = np.asarray(direction, dtype=float)
-        direction /= np.linalg.norm(direction)
-
         endpoint = origin + direction * length
+        add_segment(origin, endpoint, width, color)
 
-        if generation <= 1:
-            append_segment(
-                branch_x,
-                branch_y,
-                branch_z,
-                origin,
-                endpoint,
-            )
-        else:
-            append_segment(
-                distal_x,
-                distal_y,
-                distal_z,
-                origin,
-                endpoint,
-            )
-
+        # Fan branches outward, downward and slightly backward.
         for branch_sign in (-1, 1):
-            # Branches fan outward and downward through the lung volume.
-            lateral = side * (
-                0.44
-                + 0.08 * rng.random()
-            )
-            vertical = (
-                -0.34
-                - 0.10 * rng.random()
-            )
-            depth_component = (
-                branch_sign * 0.19
-                + 0.09 * rng.normal()
-            )
+            lateral = side * (0.34 + 0.08 * rng.random())
+            vertical = -0.28 - 0.12 * rng.random()
+            anterior = (0.05 * branch_sign) + 0.08 * rng.normal()
 
-            next_direction = np.array(
+            new_direction = np.array(
                 [
-                    0.50 * direction[0] + lateral,
-                    0.50 * direction[1] + depth_component,
-                    0.46 * direction[2] + vertical,
+                    direction[0] * 0.52 + lateral,
+                    direction[1] * 0.55 + anterior,
+                    direction[2] * 0.45 + vertical,
                 ],
                 dtype=float,
             )
-            next_direction /= np.linalg.norm(next_direction)
 
-            next_length = length * (
-                0.67
-                + 0.035 * rng.random()
-            )
+            new_direction /= np.linalg.norm(new_direction)
 
-            grow_airways(
+            grow_tree(
                 endpoint,
-                next_direction,
+                new_direction,
                 side,
                 depth - 1,
-                next_length,
-                generation + 1,
+                length * (0.66 + 0.04 * rng.random()),
+                max(1.5, width * 0.67),
+                color,
             )
 
-    grow_airways(
-        left_main,
-        direction=[-0.74, 0.03, -0.46],
+    # Main bronchi.
+    left_main_direction = np.array([-0.82, 0.02, -0.38], dtype=float)
+    right_main_direction = np.array([0.82, 0.02, -0.38], dtype=float)
+
+    left_main_direction /= np.linalg.norm(left_main_direction)
+    right_main_direction /= np.linalg.norm(right_main_direction)
+
+    main_length = 0.22 * total_width
+
+    left_main_end = bifurcation + left_main_direction * main_length
+    right_main_end = bifurcation + right_main_direction * main_length
+
+    add_segment(
+        bifurcation,
+        left_main_end,
+        width=11,
+        color="#8B5CF6",
+    )
+    add_segment(
+        bifurcation,
+        right_main_end,
+        width=11,
+        color="#8B5CF6",
+    )
+
+    # Branching airway trees. These are illustrative, not segmented.
+    grow_tree(
+        left_main_end,
+        np.array([-0.70, 0.03, -0.48]),
         side=-1,
-        depth=6,
-        length=27.0,
-        generation=0,
+        depth=5,
+        length=0.13 * total_width,
+        width=7,
+        color="#C026D3",
     )
 
-    grow_airways(
-        right_main,
-        direction=[0.74, 0.03, -0.46],
+    grow_tree(
+        right_main_end,
+        np.array([0.70, 0.03, -0.48]),
         side=1,
-        depth=6,
-        length=27.0,
-        generation=0,
+        depth=5,
+        length=0.13 * total_width,
+        width=7,
+        color="#DB2777",
     )
 
-    # Airway traces are combined by generation to stay lightweight.
-    figure.add_trace(
-        go.Scatter3d(
-            x=trunk_x,
-            y=trunk_y,
-            z=trunk_z,
-            mode="lines",
-            line=dict(
-                color="#22D3EE",
-                width=18,
-            ),
-            name="Trachea",
-            hoverinfo="skip",
-        )
-    )
+    # Subtle diaphragmatic base arcs for visual depth.
+    theta = np.linspace(-0.85 * np.pi, -0.15 * np.pi, 42)
 
-    figure.add_trace(
-        go.Scatter3d(
-            x=branch_x,
-            y=branch_y,
-            z=branch_z,
-            mode="lines",
-            line=dict(
-                color="#8B5CF6",
-                width=9,
-            ),
-            name="Main airways",
-            hoverinfo="skip",
-        )
-    )
+    for side, color in [(-1, "#F59E0B"), (1, "#FB7185")]:
+        center_x = side * 0.24 * total_width
+        radius_x = 0.22 * total_width
+        radius_y = 0.24 * total_depth
 
-    figure.add_trace(
-        go.Scatter3d(
-            x=distal_x,
-            y=distal_y,
-            z=distal_z,
-            mode="lines",
-            line=dict(
-                color="#F472B6",
-                width=4,
-            ),
-            name="Distal airway overlay",
-            hoverinfo="skip",
-        )
-    )
-
-    # ------------------------------------------------------------
-    # Diaphragmatic base highlights
-    # ------------------------------------------------------------
-
-    arc_angle = np.linspace(
-        0.12 * np.pi,
-        0.88 * np.pi,
-        70,
-    )
-
-    for side, color in [
-        (-1, "#F59E0B"),
-        (1, "#FB7185"),
-    ]:
-        x_arc = (
-            side * 58.0
-            + side * 43.0 * np.cos(arc_angle)
-        )
-        y_arc = (
-            -2.0
-            + 18.0 * np.sin(arc_angle)
-        )
-        z_arc = (
-            -61.0
-            + 4.5 * np.sin(arc_angle)
-        )
+        x_arc = center_x + radius_x * np.cos(theta)
+        y_arc = -0.04 * total_depth + radius_y * np.sin(theta)
+        z_arc = np.full_like(theta, 0.06 * total_height)
 
         figure.add_trace(
             go.Scatter3d(
@@ -910,27 +877,15 @@ def create_3d(path):
                 y=y_arc,
                 z=z_arc,
                 mode="lines",
-                line=dict(
-                    color=color,
-                    width=7,
-                ),
+                line=dict(color=color, width=6),
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
 
-    # ------------------------------------------------------------
-    # Presentation
-    # ------------------------------------------------------------
-
     figure.update_layout(
-        height=720,
-        margin=dict(
-            l=0,
-            r=0,
-            t=42,
-            b=0,
-        ),
+        height=690,
+        margin=dict(l=0, r=0, t=38, b=0),
         paper_bgcolor="#050816",
         plot_bgcolor="#050816",
         showlegend=True,
@@ -941,7 +896,7 @@ def create_3d(path):
             xanchor="center",
             x=0.5,
             font=dict(color="white"),
-            bgcolor="rgba(5,8,22,0.70)",
+            bgcolor="rgba(5,8,22,0.65)",
         ),
         scene=dict(
             aspectmode="data",
@@ -950,21 +905,9 @@ def create_3d(path):
             yaxis=dict(visible=False),
             zaxis=dict(visible=False),
             camera=dict(
-                eye=dict(
-                    x=0.05,
-                    y=-2.65,
-                    z=0.08,
-                ),
-                center=dict(
-                    x=0,
-                    y=0,
-                    z=0,
-                ),
-                up=dict(
-                    x=0,
-                    y=0,
-                    z=1,
-                ),
+                eye=dict(x=0.12, y=-2.45, z=0.28),
+                center=dict(x=0, y=0, z=0),
+                up=dict(x=0, y=0, z=1),
             ),
         ),
     )
