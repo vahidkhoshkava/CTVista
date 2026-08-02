@@ -215,7 +215,6 @@ ANATOMY = {
         "priority": "medium",
         "window": "soft",
         "fraction": 0.55,
-        "range": (0.34, 0.72),
         "range": (0.42, 0.74),
         "note_en": "Cardiac and pericardial review",
         "note_fa": "بررسی قلب و پریکارد",
@@ -235,6 +234,7 @@ ANATOMY = {
         "priority": "routine",
         "window": "soft",
         "fraction": 0.60,
+        "range": (0.35, 0.72),
         "note_en": "Routine mediastinal review",
         "note_fa": "بررسی روتین مدیاستن",
         "inspect_en": ["Lymph nodes", "Mediastinal mass", "Great vessels", "Esophagus"],
@@ -523,19 +523,36 @@ def get_slice(nii, z, vmin, vmax):
         dtype=np.float32,
     )
 
-    if image.min() >= 0 and image.max() > 3000:
-        image -= 1024.0
-
-    image = np.clip(
-        (image - vmin) / (vmax - vmin),
-        0,
-        1,
+    image = np.nan_to_num(
+        image,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
     )
 
-    return np.flipud(image.T)
+    # CT-RATE images are commonly stored with a +1024 offset.
+    # The previous max > 3000 check could miss some slices and make
+    # soft-tissue images appear almost completely white.
+    p01 = float(np.percentile(image, 1))
+    p99 = float(np.percentile(image, 99))
 
+    if p01 >= 0 and p99 > 700:
+        image -= 1024.0
 
+    normalized = np.clip(
+        (image - vmin) / (vmax - vmin),
+        0.0,
+        1.0,
+    )
 
+    # Slightly darken soft-tissue/bone windows for a cleaner,
+    # higher-contrast workstation appearance.
+    if vmax <= 300:
+        normalized = np.power(normalized, 1.18)
+    elif vmax > 1000:
+        normalized = np.power(normalized, 1.08)
+
+    return np.flipud(normalized.T)
 
 
 @st.cache_data(show_spinner="Creating a professional 3D lung overview…")
@@ -795,7 +812,7 @@ def create_3d(path):
 # ============================================================
 
 if "selected_region" not in st.session_state:
-    st.session_state.selected_region = "Lung parenchyma"
+    st.session_state.selected_region = "Pleural spaces"
 
 if "reviewed_regions" not in st.session_state:
     st.session_state.reviewed_regions = []
@@ -888,13 +905,14 @@ default_slice = int(
     selected_data["fraction"] * (number_of_slices - 1)
 )
 
-range_start = int(selected_data["range"][0] * (number_of_slices - 1))
-range_end = int(selected_data["range"][1] * (number_of_slices - 1))
+review_range = selected_data.get("range", (0.00, 1.00))
+range_start = int(review_range[0] * (number_of_slices - 1))
+range_end = int(review_range[1] * (number_of_slices - 1))
 
 window_ranges = {
-    "lung": (-1000, 400),
-    "soft": (-150, 250),
-    "bone": (-200, 1500),
+    "lung": (-1350, 150),
+    "soft": (-160, 240),
+    "bone": (-500, 1300),
 }
 
 window_names = {
