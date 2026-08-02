@@ -812,7 +812,7 @@ def create_3d(path):
 # ============================================================
 
 if "selected_region" not in st.session_state:
-    st.session_state.selected_region = "Pleural spaces"
+    st.session_state.selected_region = "Lung parenchyma"
 
 if "reviewed_regions" not in st.session_state:
     st.session_state.reviewed_regions = []
