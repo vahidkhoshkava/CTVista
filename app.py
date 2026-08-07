@@ -504,8 +504,7 @@ def render_html(html_text):
 def load_ct():
     token = st.secrets.get("HF_TOKEN", os.environ.get("HF_TOKEN"))
 
-    if not token:
-        raise RuntimeError("HF_TOKEN is missing in Streamlit Secrets.")
+    token = os.environ.get("HF_TOKEN", None)
 
     path = hf_hub_download(
         repo_id="ibrahimhamamci/CT-RATE",
