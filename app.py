@@ -502,8 +502,6 @@ def render_html(html_text):
 
 @st.cache_resource(show_spinner="Downloading demonstration CT…")
 def load_ct():
-    token = st.secrets.get("HF_TOKEN", os.environ.get("HF_TOKEN"))
-
     token = os.environ.get("HF_TOKEN", None)
 
     path = hf_hub_download(
